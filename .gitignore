@@ -1,0 +1,9 @@
+.env
+*.mp4
+*.mov
+*.MP4
+*.MOV
+__pycache__/
+*.pyc
+.DS_Store
+assets/outputs/

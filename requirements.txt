@@ -1,0 +1,3 @@
+requests
+imageio-ffmpeg
+python-dotenv
