@@ -18,8 +18,6 @@ Find an ad that's performing in your niche. Drop in your product. Get a clone in
 6. You approve it, Claude Code runs the generation
 7. Video lands in `outputs/` in ~5-10 minutes
 
-**Cost:** ~$7-12 per 15-second video
-
 ---
 
 ## Prerequisites
