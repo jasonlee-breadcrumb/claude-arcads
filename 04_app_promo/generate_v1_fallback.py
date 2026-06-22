@@ -72,18 +72,85 @@ def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     return payload
 
 
-def api_post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    response = requests.post(ac.BASE + path, headers=ac.HEADERS, json=body, timeout=60)
+def api_post(path: str, body: Optional[Dict[str, Any]] = None) -> Any:
+    kwargs: Dict[str, Any] = {"headers": ac.HEADERS, "timeout": 60}
+    if body is not None:
+        kwargs["json"] = body
+    response = requests.post(ac.BASE + path, **kwargs)
     try:
         payload = response.json()
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(f"Arcads POST {path} returned non-JSON HTTP {response.status_code}: {response.text[:300]}") from exc
     if response.status_code >= 400:
-        safe = {k: v for k, v in body.items() if k not in {"text", "prompt"}}
+        safe = {k: v for k, v in (body or {}).items() if k not in {"text", "prompt"}}
         raise RuntimeError(
             f"Arcads POST {path} failed HTTP {response.status_code}: {json.dumps(payload)[:500]} request={safe}"
         )
     return payload
+
+
+def default_folder_id() -> str:
+    payload = api_get(f"/v1/products/{ac.PRODUCT_ID}/folders")
+    folders = _items(payload)
+    if not folders:
+        raise RuntimeError(f"No folders returned for Arcads product {ac.PRODUCT_ID}")
+    for folder in folders:
+        if folder.get("isDefaultFolder"):
+            return str(folder["id"])
+    return str(folders[0]["id"])
+
+
+def get_script_videos(script_id: str) -> List[Dict[str, Any]]:
+    return _items(api_get(f"/v1/scripts/{script_id}/videos"))
+
+
+def download_url(url: str, dest: Path) -> None:
+    response = requests.get(url, stream=True, timeout=120)
+    response.raise_for_status()
+    with open(dest, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+    print(f"  Saved: {dest} ({dest.stat().st_size // 1024}KB)", flush=True)
+
+
+def _video_status_text(video: Dict[str, Any]) -> str:
+    status = video.get("videoStatus")
+    if isinstance(status, dict):
+        for key in ("status", "state", "name"):
+            if status.get(key):
+                return str(status[key])
+        return json.dumps(status)[:120]
+    if status:
+        return str(status)
+    if video.get("videoUrl"):
+        return "generated"
+    return "unknown"
+
+
+def poll_v1_video(video_id: str, timeout_sec: int = 900) -> str:
+    deadline = time.time() + timeout_sec
+    while True:
+        video = api_get(f"/v1/videos/{video_id}")
+        status = _video_status_text(video)
+        print(f"  {time.strftime('%H:%M:%S')} V1Video {video_id}: {status}", flush=True)
+        if video.get("videoUrl"):
+            return str(video["videoUrl"])
+        try:
+            watch = api_get(f"/v1/videos/{video_id}/watch")
+            if isinstance(watch, str) and watch:
+                return watch
+            if isinstance(watch, dict) and watch.get("url"):
+                return str(watch["url"])
+        except RuntimeError as exc:
+            if "HTTP 422" not in str(exc):
+                raise
+        lowered = json.dumps(video).lower()
+        if "failed" in lowered or "error" in lowered:
+            raise RuntimeError(f"Arcads v1 video failed: {json.dumps(video)[:500]}")
+        if time.time() >= deadline:
+            raise RuntimeError(f"Timed out waiting for Arcads v1 video {video_id}; last status={status}")
+        time.sleep(30)
 
 
 def extract_dialog(generate_py: Path) -> str:
@@ -271,28 +338,35 @@ def main() -> int:
         print("DRY_RUN_OK no Arcads asset was created; pass --run to spend credits and generate.")
         return 0
 
-    script_payload = api_post("/v1/scripts", {"name": args.name, "text": script_text})
+    folder_id = default_folder_id()
+    script_payload = api_post("/v1/scripts", {
+        "folderId": folder_id,
+        "name": args.name,
+        "text": script_text,
+    })
     script_id = _extract_id(script_payload)
     if not script_id:
         raise RuntimeError(f"/v1/scripts returned no id: {json.dumps(script_payload)[:500]}")
-    video_payload = api_post("/v1/videos", {
-        "scriptId": script_id,
-        "situationId": situation["id"],
-        "actorId": actor_id,
-        "voiceId": voice_id,
-    })
-    asset_id = _extract_id(video_payload)
-    if not asset_id:
-        raise RuntimeError(f"/v1/videos returned no asset id: {json.dumps(video_payload)[:500]}")
-    print(f"V1_JOB_ID {asset_id}")
-    clip_data = ac.poll(asset_id, "V1AppPromo")
-    if clip_data.get("status") == "failed":
-        raise RuntimeError(f"Arcads v1 generation failed: {json.dumps(clip_data)[:500]}")
+    videos = get_script_videos(script_id)
+    if not videos:
+        video_payload = api_post("/v1/videos", {
+            "scriptId": script_id,
+            "situationId": situation["id"],
+            "voiceId": voice_id,
+        })
+        video_id = _extract_id(video_payload)
+    else:
+        video_id = _extract_id(videos[0])
+    if not video_id:
+        raise RuntimeError(f"No v1 video id returned for script {script_id}: {json.dumps(videos or script_payload)[:500]}")
+    print(f"V1_SCRIPT_ID {script_id}")
+    print(f"V1_VIDEO_ID {video_id}")
+    api_post(f"/v1/scripts/{script_id}/generate")
+    video_url = poll_v1_video(video_id)
     version = ac.next_version(str(OUT), "app_promo")
     raw_file = OUT / f"app_v1_fallback_raw_v{version}.mp4"
     final_file = OUT / f"app_promo_v{version}.mp4"
-    if not ac.download(clip_data, str(raw_file)):
-        raise RuntimeError("Arcads v1 generated but no downloadable URL was returned")
+    download_url(video_url, raw_file)
     build_hard_cut(raw_file, final_file, walkthru_path, cuts, offsets)
     print(f"DONE {final_file} size_bytes={final_file.stat().st_size}")
     return 0
