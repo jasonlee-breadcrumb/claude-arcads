@@ -361,7 +361,18 @@ def main() -> int:
         raise RuntimeError(f"No v1 video id returned for script {script_id}: {json.dumps(videos or script_payload)[:500]}")
     print(f"V1_SCRIPT_ID {script_id}")
     print(f"V1_VIDEO_ID {video_id}")
-    api_post(f"/v1/scripts/{script_id}/generate")
+    try:
+        api_post(f"/v1/scripts/{script_id}/generate")
+    except RuntimeError as exc:
+        if "INVALID_PLAN" in str(exc):
+            print(
+                "V1_GENERATE_BLOCKED_INVALID_PLAN "
+                f"script_id={script_id} video_id={video_id} "
+                "no_downloadable_mp4_created manifest_unchanged",
+                flush=True,
+            )
+            return 2
+        raise
     video_url = poll_v1_video(video_id)
     version = ac.next_version(str(OUT), "app_promo")
     raw_file = OUT / f"app_v1_fallback_raw_v{version}.mp4"
